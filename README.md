@@ -1,5 +1,15 @@
 # ansible-rhcl-aws-demo
 
+<p align="center">
+  <img src="rhcl_architecture.png" alt="RHCL demo request flow: App Web / App Mobile → Gateway → AuthPolicy → RateLimitPolicy → HTTPRoute → Movie Quarks" width="520">
+</p>
+
+The diagram above shows the request flow this demo builds with RHCL: the **App Web**
+and **App Mobile** clients (each with its own API key) hit the **Gateway**, where the
+**AuthPolicy** authenticates/identifies the caller and the **RateLimitPolicy** enforces
+per-identity limits; the **HTTPRoute** then routes `/api/v1/movies` to the **Movie
+Quarks** service. Teal blocks are Gateway API (routing); purple blocks are RHCL policies.
+
 Ansible automation that bootstraps a **Red Hat Connectivity Link (RHCL / Kuadrant)**
 API-gateway demo on OpenShift, on top of **OpenShift GitOps (ArgoCD)** and
 **OpenShift Service Mesh 3 (Sail/Istio)**.
