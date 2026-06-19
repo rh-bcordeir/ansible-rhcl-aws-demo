@@ -1,0 +1,193 @@
+---
+# -----------------------------------------------------------------------------
+# Optional: GatewayClass for the built-in OpenShift Gateway controller.
+# Only created when NOT using Service Mesh (gateway_class == openshift-default).
+# -----------------------------------------------------------------------------
+- name: Create the openshift-default GatewayClass
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: GatewayClass
+      metadata:
+        name: openshift-default
+      spec:
+        controllerName: openshift.io/gateway-controller/v1
+  when: gateway_class == 'openshift-default'
+
+# -----------------------------------------------------------------------------
+# Gateway
+# -----------------------------------------------------------------------------
+- name: Ensure the api-gateway namespace exists
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ api_gateway_namespace }}"
+
+- name: Create the ingress Gateway
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: Gateway
+      metadata:
+        name: "{{ gateway_name }}"
+        namespace: "{{ api_gateway_namespace }}"
+        labels:
+          kuadrant.io/gateway: "true"
+      spec:
+        gatewayClassName: "{{ gateway_class }}"
+        listeners:
+          - name: http
+            port: 80
+            protocol: HTTP
+            allowedRoutes:
+              namespaces:
+                from: All
+
+# -----------------------------------------------------------------------------
+# HTTPRoute (lives in the application namespace, targets the backend Service)
+# -----------------------------------------------------------------------------
+- name: Create the HTTPRoute for the movies API
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: HTTPRoute
+      metadata:
+        name: movies-quarkus
+        namespace: "{{ app_namespace }}"
+      spec:
+        parentRefs:
+          - name: "{{ gateway_name }}"
+            namespace: "{{ api_gateway_namespace }}"
+        rules:
+          - matches:
+              - path:
+                  type: PathPrefix
+                  value: "{{ route_path_prefix }}"
+            backendRefs:
+              - name: "{{ app_service_name }}"
+                port: "{{ app_service_port }}"
+
+# -----------------------------------------------------------------------------
+# Auth: deny-all on the Gateway, allow API-key holders on the HTTPRoute
+# -----------------------------------------------------------------------------
+- name: Wait for the AuthPolicy CRD to be established
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: authpolicies.kuadrant.io
+  register: _auth_crd
+  retries: "{{ crd_wait_retries }}"
+  delay: "{{ crd_wait_delay }}"
+  until: _auth_crd.resources | length > 0
+
+- name: Create the default deny-all AuthPolicy on the Gateway
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: kuadrant.io/v1
+      kind: AuthPolicy
+      metadata:
+        name: "{{ gateway_name }}-auth"
+        namespace: "{{ api_gateway_namespace }}"
+      spec:
+        targetRef:
+          group: gateway.networking.k8s.io
+          kind: Gateway
+          name: "{{ gateway_name }}"
+        defaults:
+          when:
+            - predicate: "request.path != '/health'"
+          rules:
+            authorization:
+              deny-all:
+                opa:
+                  rego: "allow = false"
+            response:
+              unauthorized:
+                headers:
+                  "content-type":
+                    value: application/json
+                body:
+                  value: |
+                    {
+                      "error": "Forbidden",
+                      "message": "Acesso negado por padrão pelo gateway. Se você é o administrador do serviço, crie uma auth policy específica para a rota."
+                    }
+
+- name: Create the API-key AuthPolicy on the HTTPRoute
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: kuadrant.io/v1
+      kind: AuthPolicy
+      metadata:
+        name: movies-quarkus-auth
+        namespace: "{{ app_namespace }}"
+      spec:
+        targetRef:
+          group: gateway.networking.k8s.io
+          kind: HTTPRoute
+          name: movies-quarkus
+        defaults:
+          rules:
+            authentication:
+              "api-key-users":
+                apiKey:
+                  selector:
+                    matchLabels:
+                      app: "{{ api_key_app_label }}"
+                credentials:
+                  authorizationHeader:
+                    prefix: APIKEY
+            response:
+              success:
+                filters:
+                  "identity":
+                    json:
+                      properties:
+                        "userid":
+                          selector: auth.identity.metadata.annotations.secret\.kuadrant\.io/user-id
+
+# -----------------------------------------------------------------------------
+# Rate limiting per identity
+# -----------------------------------------------------------------------------
+- name: Wait for the RateLimitPolicy CRD to be established
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: ratelimitpolicies.kuadrant.io
+  register: _rlp_crd
+  retries: "{{ crd_wait_retries }}"
+  delay: "{{ crd_wait_delay }}"
+  until: _rlp_crd.resources | length > 0
+
+- name: Create the RateLimitPolicy on the HTTPRoute
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: kuadrant.io/v1
+      kind: RateLimitPolicy
+      metadata:
+        name: movies-quarkus-rlp
+        namespace: "{{ app_namespace }}"
+      spec:
+        targetRef:
+          group: gateway.networking.k8s.io
+          kind: HTTPRoute
+          name: movies-quarkus
+        limits:
+          web-app-limit:
+            rates:
+              - limit: "{{ rate_limits['web-app'].limit }}"
+                window: "{{ rate_limits['web-app'].window }}"
+            counters:
+              - expression: auth.identity.userid
+            when:
+              - predicate: "auth.identity.userid == 'web-app'"
+          mobile-app-limit:
+            rates:
+              - limit: "{{ rate_limits['mobile-app'].limit }}"
+                window: "{{ rate_limits['mobile-app'].window }}"
+            counters:
+              - expression: auth.identity.userid
+            when:
+              - predicate: "auth.identity.userid == 'mobile-app'"

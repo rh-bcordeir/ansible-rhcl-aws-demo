@@ -1,0 +1,58 @@
+---
+- name: Wait for the Kuadrant CRD to be established
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: kuadrants.kuadrant.io
+  register: _kuadrant_crd
+  retries: "{{ crd_wait_retries }}"
+  delay: "{{ crd_wait_delay }}"
+  until: _kuadrant_crd.resources | length > 0
+
+- name: Create the Kuadrant control-plane instance
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: kuadrant.io/v1beta1
+      kind: Kuadrant
+      metadata:
+        name: kuadrant
+        namespace: "{{ kuadrant_system_namespace }}"
+      spec: {}
+
+- name: Wait for Kuadrant to become Ready
+  kubernetes.core.k8s_info:
+    api_version: kuadrant.io/v1beta1
+    kind: Kuadrant
+    name: kuadrant
+    namespace: "{{ kuadrant_system_namespace }}"
+  register: _kuadrant
+  retries: "{{ csv_wait_retries }}"
+  delay: "{{ csv_wait_delay }}"
+  until: >-
+    (_kuadrant.resources | default([]))
+      | map(attribute='status.conditions') | flatten
+      | selectattr('type', 'equalto', 'Ready')
+      | selectattr('status', 'equalto', 'True')
+      | list | length > 0
+  failed_when: false   # don't block the demo if status reporting lags
+
+- name: Create the per-application API-key secrets (consumed by Authorino)
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: Secret
+      type: Opaque
+      metadata:
+        name: "{{ item.secret_name }}"
+        namespace: "{{ kuadrant_system_namespace }}"
+        labels:
+          authorino.kuadrant.io/managed-by: authorino
+          app: "{{ api_key_app_label }}"
+        annotations:
+          secret.kuadrant.io/user-id: "{{ item.user_id }}"
+      stringData:
+        api_key: "{{ item.api_key }}"
+  loop: "{{ api_keys }}"
+  loop_control:
+    label: "{{ item.secret_name }}"
+  no_log: true

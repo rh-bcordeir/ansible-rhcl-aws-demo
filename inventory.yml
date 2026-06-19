@@ -1,0 +1,9 @@
+---
+# This project runs entirely against the cluster you are logged into with `oc`.
+# All tasks execute locally and talk to the Kubernetes/OpenShift API via your
+# current kubeconfig context.
+all:
+  hosts:
+    localhost:
+      ansible_connection: local
+      ansible_python_interpreter: "{{ ansible_playbook_python }}"

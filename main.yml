@@ -1,0 +1,79 @@
+---
+# =============================================================================
+# RHCL + Service Mesh 3 + OpenShift GitOps demo bootstrap
+#
+# Requires: you must be logged into the target cluster with `oc login` first.
+# Run with:  ansible-playbook main.yml
+#
+# Useful tags (ansible-playbook main.yml --tags <tag>):
+#   preflight  operators  gitops  mesh  rhcl  kuadrant  demo-app
+#   gateway    auth       ratelimit  info
+# =============================================================================
+- name: Deploy RHCL / Service Mesh 3 / GitOps demo
+  hosts: localhost
+  gather_facts: false
+  vars_files:
+    - group_vars/all.yml
+
+  tasks:
+    # ---- Preflight ---------------------------------------------------------
+    - name: Preflight checks
+      ansible.builtin.import_role:
+        name: preflight
+      tags: [always, preflight]
+
+    # ---- Operators (each role verifies before installing) ------------------
+    - name: Install OpenShift GitOps operator
+      ansible.builtin.include_role:
+        name: olm_operator
+      vars:
+        op: "{{ gitops_operator }}"
+      tags: [operators, gitops]
+
+    - name: Install OpenShift Service Mesh 3 operator
+      ansible.builtin.include_role:
+        name: olm_operator
+      vars:
+        op: "{{ service_mesh_operator }}"
+      tags: [operators, mesh]
+
+    - name: Install Red Hat Connectivity Link (RHCL) operator
+      ansible.builtin.include_role:
+        name: olm_operator
+      vars:
+        op: "{{ rhcl_operator }}"
+      tags: [operators, rhcl]
+
+    - name: Enable RHCL web-console plugin
+      ansible.builtin.import_role:
+        name: console_plugins
+      tags: [operators, rhcl, console]
+
+    # ---- Custom resources --------------------------------------------------
+    - name: Configure Kuadrant (RHCL control plane)
+      ansible.builtin.import_role:
+        name: kuadrant
+      tags: [rhcl, kuadrant]
+
+    - name: Configure Service Mesh 3 control plane (Istio + IstioCNI)
+      ansible.builtin.import_role:
+        name: mesh
+      when: gateway_class == 'istio'
+      tags: [mesh]
+
+    - name: Deploy demo application via ArgoCD
+      ansible.builtin.import_role:
+        name: demo_app
+      when: deploy_demo_app | bool
+      tags: [demo-app]
+
+    - name: Configure Gateway, routing, auth and rate limiting
+      ansible.builtin.import_role:
+        name: gateway
+      tags: [gateway, auth, ratelimit]
+
+    # ---- Wrap up -----------------------------------------------------------
+    - name: Print access information
+      ansible.builtin.import_role:
+        name: info
+      tags: [always, info]

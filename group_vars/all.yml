@@ -1,0 +1,109 @@
+---
+# =============================================================================
+# Global variables for the RHCL / Service Mesh 3 / OpenShift GitOps demo
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Operators (channels/sources verified against the target cluster catalog)
+# -----------------------------------------------------------------------------
+gitops_operator:
+  name: openshift-gitops-operator
+  namespace: openshift-operators        # cluster-scoped, AllNamespaces install
+  channel: latest
+  source: redhat-operators
+  csv_prefix: openshift-gitops-operator
+  create_namespace: false               # openshift-operators already exists
+  create_operatorgroup: false           # global OperatorGroup already present
+
+service_mesh_operator:
+  name: servicemeshoperator3            # Red Hat OpenShift Service Mesh 3 (Sail)
+  namespace: openshift-operators
+  channel: stable
+  source: redhat-operators
+  csv_prefix: servicemeshoperator3
+  create_namespace: false
+  create_operatorgroup: false
+
+rhcl_operator:
+  name: rhcl-operator                   # Red Hat Connectivity Link (Kuadrant)
+  namespace: kuadrant-system            # <-- installed in its own namespace
+  channel: stable
+  source: redhat-operators
+  csv_prefix: rhcl-operator
+  create_namespace: true
+  create_operatorgroup: true            # AllNamespaces OperatorGroup (empty spec)
+
+# OpenShift web-console plugins to enable. The RHCL operator ships the
+# "kuadrant-console-plugin" ConsolePlugin but it is NOT enabled automatically;
+# it must be added to the cluster Console operator config.
+console_plugins_to_enable:
+  - kuadrant-console-plugin
+
+# -----------------------------------------------------------------------------
+# Namespaces
+# -----------------------------------------------------------------------------
+kuadrant_system_namespace: kuadrant-system
+istio_system_namespace: istio-system
+istio_cni_namespace: istio-cni
+api_gateway_namespace: api-gateway
+app_namespace: cinema
+
+# -----------------------------------------------------------------------------
+# Gateway / routing
+# -----------------------------------------------------------------------------
+# Use "istio" when routing through Service Mesh 3 (default for this demo).
+# Switch to "openshift-default" to use the built-in OpenShift Gateway controller.
+gateway_class: istio
+gateway_name: ingress-gateway
+
+# Backend service that the HTTPRoute points to (lives in the "cinema" namespace,
+# created by the movies-quarkus Helm chart). Confirm the real Service name after
+# the ArgoCD application has synced:  oc get svc -n cinema
+app_service_name: movies-quarkus
+app_service_port: 8080
+route_path_prefix: /api/v1/movies
+
+# -----------------------------------------------------------------------------
+# Demo application (deployed through OpenShift GitOps / ArgoCD)
+# -----------------------------------------------------------------------------
+deploy_demo_app: true
+argocd_namespace: openshift-gitops
+demo_app:
+  name: movies-quarkus
+  repo_url: https://github.com/rh-bcordeir/movies-quarkus-devops
+  # Path to the Helm chart inside the repo.
+  path: chart
+  target_revision: main
+  # Helm values files, relative to the chart path above. If the file lives at
+  # the repo root instead of inside the chart, use "../values/values-dev.yaml".
+  value_files:
+    - values/values-dev.yaml
+
+# -----------------------------------------------------------------------------
+# API keys consumed by the Authorino (RHCL) AuthPolicy
+# -----------------------------------------------------------------------------
+api_keys:
+  - secret_name: web-app-key
+    user_id: web-app
+    api_key: CHAVE_DO_APP_WEB
+  - secret_name: mobile-app-key
+    user_id: mobile-app
+    api_key: CHAVE_DO_APP_MOBILE
+
+# Label that all API-key secrets share; the AuthPolicy selects on it.
+api_key_app_label: movies-quarkus
+
+# -----------------------------------------------------------------------------
+# Rate limits (requests / window) per identity
+# -----------------------------------------------------------------------------
+rate_limits:
+  web-app: { limit: 5, window: 10s }
+  mobile-app: { limit: 2, window: 10s }
+
+# -----------------------------------------------------------------------------
+# Behaviour tuning
+# -----------------------------------------------------------------------------
+csv_wait_retries: 60
+csv_wait_delay: 10
+crd_wait_retries: 60
+crd_wait_delay: 5

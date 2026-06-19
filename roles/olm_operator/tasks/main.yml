@@ -1,0 +1,83 @@
+---
+# Generic, idempotent OLM operator installer.
+# Expects an `op` dict (see group_vars/all.yml): name, namespace, channel,
+# source, csv_prefix, create_namespace, create_operatorgroup.
+
+- name: "[{{ op.name }}] Ensure operator namespace exists"
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ op.namespace }}"
+  when: op.create_namespace | default(false) | bool
+
+- name: "[{{ op.name }}] Check whether the operator is already installed"
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    namespace: "{{ op.namespace }}"
+  register: _existing_csvs
+
+- name: "[{{ op.name }}] Determine install state"
+  ansible.builtin.set_fact:
+    _op_installed: >-
+      {{ (_existing_csvs.resources | default([]))
+         | selectattr('metadata.name', 'search', op.csv_prefix)
+         | list | length > 0 }}
+
+- name: "[{{ op.name }}] Already installed — skipping subscription creation"
+  ansible.builtin.debug:
+    msg: "{{ op.name }} is already present in namespace {{ op.namespace }}; leaving it as-is."
+  when: _op_installed | bool
+
+- name: "[{{ op.name }}] Ensure OperatorGroup exists (AllNamespaces)"
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: operators.coreos.com/v1
+      kind: OperatorGroup
+      metadata:
+        name: "{{ op.namespace }}-operatorgroup"
+        namespace: "{{ op.namespace }}"
+      spec: {}            # empty spec == watch all namespaces (AllNamespaces)
+  when:
+    - not (_op_installed | bool)
+    - op.create_operatorgroup | default(false) | bool
+
+- name: "[{{ op.name }}] Create Subscription"
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: operators.coreos.com/v1alpha1
+      kind: Subscription
+      metadata:
+        name: "{{ op.name }}"
+        namespace: "{{ op.namespace }}"
+      spec:
+        channel: "{{ op.channel }}"
+        name: "{{ op.name }}"
+        source: "{{ op.source }}"
+        sourceNamespace: openshift-marketplace
+        installPlanApproval: Automatic
+  when: not (_op_installed | bool)
+
+- name: "[{{ op.name }}] Wait for the ClusterServiceVersion to reach 'Succeeded'"
+  kubernetes.core.k8s_info:
+    api_version: operators.coreos.com/v1alpha1
+    kind: ClusterServiceVersion
+    namespace: "{{ op.namespace }}"
+  register: _csv_check
+  retries: "{{ csv_wait_retries }}"
+  delay: "{{ csv_wait_delay }}"
+  until: >-
+    (_csv_check.resources | default([]))
+      | selectattr('metadata.name', 'search', op.csv_prefix)
+      | selectattr('status.phase', 'defined')
+      | selectattr('status.phase', 'equalto', 'Succeeded')
+      | list | length > 0
+
+- name: "[{{ op.name }}] Operator is ready"
+  ansible.builtin.debug:
+    msg: >-
+      {{ (_csv_check.resources
+          | selectattr('metadata.name', 'search', op.csv_prefix)
+          | map(attribute='metadata.name') | list | first) }} is Succeeded.

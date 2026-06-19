@@ -1,0 +1,42 @@
+---
+- name: Look up the Gateway LoadBalancer service
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Service
+    namespace: "{{ api_gateway_namespace }}"
+    label_selectors:
+      - "gateway.networking.k8s.io/gateway-name={{ gateway_name }}"
+  register: _gw_svc
+  failed_when: false
+
+- name: Extract the external hostname (if assigned)
+  ansible.builtin.set_fact:
+    _gw_host: >-
+      {{ (_gw_svc.resources | default([])
+          | map(attribute='status.loadBalancer.ingress', default=[])
+          | flatten
+          | map(attribute='hostname', default='')
+          | select('truthy') | list | first) | default('<pending-loadbalancer>', true) }}
+
+- name: Summary
+  ansible.builtin.debug:
+    msg:
+      - "================ Demo bootstrap complete ================"
+      - "Gateway endpoint : http://{{ _gw_host }}"
+      - ""
+      - "If the host is <pending-loadbalancer>, the AWS LB is still being"
+      - "provisioned. Re-check with:"
+      - "  oc get svc -n {{ api_gateway_namespace }}"
+      - ""
+      - "Confirm the cinema backend Service name matches app_service_name"
+      - "('{{ app_service_name }}'):  oc get svc -n {{ app_namespace }}"
+      - ""
+      - "Test (denied by default / no key):"
+      - "  curl -i http://{{ _gw_host }}{{ route_path_prefix }}"
+      - ""
+      - "Test with the web-app API key:"
+      - "  curl -i -H 'Authorization: APIKEY CHAVE_DO_APP_WEB' http://{{ _gw_host }}{{ route_path_prefix }}"
+      - ""
+      - "Rate-limit test (mobile, 2/10s):"
+      - "  for i in $(seq 1 6); do curl -s -o /dev/null -w '%{http_code}\\n' -H 'Authorization: APIKEY CHAVE_DO_APP_MOBILE' http://{{ _gw_host }}{{ route_path_prefix }}; done"
+      - "========================================================="

@@ -1,0 +1,46 @@
+---
+- name: Ensure the application namespace exists and is managed by ArgoCD
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ app_namespace }}"
+        labels:
+          argocd.argoproj.io/managed-by: "{{ argocd_namespace }}"
+
+- name: Wait for the ArgoCD Application CRD to be established
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: applications.argoproj.io
+  register: _argo_crd
+  retries: "{{ crd_wait_retries }}"
+  delay: "{{ crd_wait_delay }}"
+  until: _argo_crd.resources | length > 0
+
+- name: Create the ArgoCD Application for the movies-quarkus demo
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: argoproj.io/v1alpha1
+      kind: Application
+      metadata:
+        name: "{{ demo_app.name }}"
+        namespace: "{{ argocd_namespace }}"
+      spec:
+        project: default
+        source:
+          repoURL: "{{ demo_app.repo_url }}"
+          targetRevision: "{{ demo_app.target_revision }}"
+          path: "{{ demo_app.path }}"
+          helm:
+            valueFiles: "{{ demo_app.value_files | default([]) }}"
+        destination:
+          server: https://kubernetes.default.svc
+          namespace: "{{ app_namespace }}"
+        syncPolicy:
+          automated:
+            prune: true
+            selfHeal: true
+          syncOptions:
+            - CreateNamespace=false

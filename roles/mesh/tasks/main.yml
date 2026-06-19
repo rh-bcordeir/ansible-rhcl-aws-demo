@@ -1,0 +1,66 @@
+---
+# Service Mesh 3 uses the Sail operator API (sailoperator.io/v1).
+# Only relevant when gateway_class == "istio".
+
+- name: Ensure mesh namespaces exist
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ item }}"
+  loop:
+    - "{{ istio_system_namespace }}"
+    - "{{ istio_cni_namespace }}"
+    - "{{ api_gateway_namespace }}"
+
+- name: Wait for the Istio (Sail) CRDs to be established
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: "{{ item }}"
+  register: _istio_crds
+  retries: "{{ crd_wait_retries }}"
+  delay: "{{ crd_wait_delay }}"
+  until: _istio_crds.resources | length > 0
+  loop:
+    - istios.sailoperator.io
+    - istiocnis.sailoperator.io
+  loop_control:
+    label: "{{ item }}"
+
+- name: Create the Istio control plane
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: sailoperator.io/v1
+      kind: Istio
+      metadata:
+        name: default
+      spec:
+        namespace: "{{ istio_system_namespace }}"
+
+- name: Create the Istio CNI
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: sailoperator.io/v1
+      kind: IstioCNI
+      metadata:
+        name: default
+      spec:
+        namespace: "{{ istio_cni_namespace }}"
+
+- name: Wait for the Istio control plane to become Ready
+  kubernetes.core.k8s_info:
+    api_version: sailoperator.io/v1
+    kind: Istio
+    name: default
+  register: _istio
+  retries: "{{ csv_wait_retries }}"
+  delay: "{{ csv_wait_delay }}"
+  until: >-
+    (_istio.resources | default([]))
+      | map(attribute='status.conditions') | flatten
+      | selectattr('type', 'equalto', 'Ready')
+      | selectattr('status', 'equalto', 'True')
+      | list | length > 0
+  failed_when: false

@@ -1,0 +1,43 @@
+---
+- name: Verify the oc CLI is available
+  ansible.builtin.command: oc version --client
+  changed_when: false
+  register: _oc_version
+
+- name: Verify you are logged into a cluster
+  ansible.builtin.command: oc whoami
+  changed_when: false
+  register: _oc_whoami
+  failed_when: _oc_whoami.rc != 0
+
+- name: Get current cluster server URL
+  ansible.builtin.command: oc whoami --show-server
+  changed_when: false
+  register: _oc_server
+
+- name: Show connection context
+  ansible.builtin.debug:
+    msg:
+      - "Logged in as: {{ _oc_whoami.stdout }}"
+      - "Cluster:       {{ _oc_server.stdout }}"
+
+- name: Verify the Python kubernetes client is importable
+  ansible.builtin.command: "{{ ansible_python_interpreter | default(ansible_playbook_python) }} -c 'import kubernetes'"
+  changed_when: false
+  register: _py_k8s
+  failed_when: _py_k8s.rc != 0
+
+- name: Verify Gateway API CRDs are present on the cluster
+  kubernetes.core.k8s_info:
+    api_version: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: gateways.gateway.networking.k8s.io
+  register: _gwapi
+
+- name: Warn if Gateway API CRDs are missing
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: Gateway API CRDs (gateways.gateway.networking.k8s.io) were not
+      found. They are normally provided by OpenShift 4.x / Service Mesh 3.
+      Routing resources may fail until they are available.
+  when: _gwapi.resources | length == 0

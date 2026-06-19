@@ -1,0 +1,48 @@
+---
+# Enables OpenShift web-console plugins (e.g. the RHCL / Kuadrant console UI).
+# The operator registers the ConsolePlugin but does not enable it; it has to be
+# added to the cluster Console operator config (consoles.operator.openshift.io).
+
+- name: Wait for the ConsolePlugin(s) to be registered by the operator
+  kubernetes.core.k8s_info:
+    api_version: console.openshift.io/v1
+    kind: ConsolePlugin
+    name: "{{ item }}"
+  register: _console_plugin
+  retries: "{{ crd_wait_retries }}"
+  delay: "{{ crd_wait_delay }}"
+  until: _console_plugin.resources | length > 0
+  loop: "{{ console_plugins_to_enable }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Read the currently enabled console plugins
+  kubernetes.core.k8s_info:
+    api_version: operator.openshift.io/v1
+    kind: Console
+    name: cluster
+  register: _console
+
+- name: Compute the desired plugin set (union — keeps existing plugins)
+  ansible.builtin.set_fact:
+    _desired_plugins: >-
+      {{ (_console.resources[0].spec.plugins | default([]))
+         | union(console_plugins_to_enable) | unique }}
+
+- name: Enable the console plugin(s)
+  kubernetes.core.k8s:
+    state: patched
+    definition:
+      apiVersion: operator.openshift.io/v1
+      kind: Console
+      metadata:
+        name: cluster
+      spec:
+        plugins: "{{ _desired_plugins }}"
+  when: >-
+    _desired_plugins | sort
+    != (_console.resources[0].spec.plugins | default([]) | sort)
+
+- name: Report enabled console plugins
+  ansible.builtin.debug:
+    msg: "Console plugins now enabled: {{ _desired_plugins }} (web console may take ~1 min to reload)"
