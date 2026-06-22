@@ -1,0 +1,218 @@
+---
+# =============================================================================
+# RHCL / Kuadrant observability
+#
+# 1. Enable OpenShift User Workload Monitoring (UWM)
+# 2. Turn on Kuadrant's own observability (ServiceMonitors/PodMonitors)
+# 3. Install the Kuadrant metrics exporter (gatewayapi_*) + dashboards
+# 4. Deploy a plain Grafana (Deployment + Service + Route) wired to read the
+#    in-cluster monitoring stack via a cluster-monitoring-view ServiceAccount
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. User Workload Monitoring — merge enableUserWorkload:true into the existing
+#    cluster-monitoring-config without clobbering any other settings.
+# -----------------------------------------------------------------------------
+- name: Read the existing cluster-monitoring-config ConfigMap
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: ConfigMap
+    name: cluster-monitoring-config
+    namespace: openshift-monitoring
+  register: _cmc
+
+- name: Compute the merged monitoring config (enable user workload monitoring)
+  ansible.builtin.set_fact:
+    _monitoring_config: >-
+      {{ ((_cmc.resources | default([]) | first | default({})).data | default({}))['config.yaml']
+         | default('') | from_yaml | default({}, true)
+         | combine({'enableUserWorkload': true}) }}
+
+- name: Enable User Workload Monitoring
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: cluster-monitoring-config
+        namespace: openshift-monitoring
+      data:
+        config.yaml: "{{ _monitoring_config | to_nice_yaml }}"
+
+# -----------------------------------------------------------------------------
+# 2. Enable Kuadrant observability on the Kuadrant CR (creates the component and
+#    gateway ServiceMonitors/PodMonitors, incl. in the api-gateway namespace).
+# -----------------------------------------------------------------------------
+- name: Enable observability on the Kuadrant CR
+  kubernetes.core.k8s:
+    state: patched
+    api_version: kuadrant.io/v1beta1
+    kind: Kuadrant
+    name: kuadrant
+    namespace: "{{ kuadrant_system_namespace }}"
+    definition:
+      spec:
+        observability:
+          enable: true
+
+# -----------------------------------------------------------------------------
+# 3. Kuadrant observability bundle (kube-state-metrics-kuadrant exporter +
+#    operator ServiceMonitors) and the example dashboards.
+# -----------------------------------------------------------------------------
+- name: Install the Kuadrant observability stack (kube-state-metrics-kuadrant + ServiceMonitors)
+  ansible.builtin.command:
+    cmd: "oc apply -k {{ kuadrant_observability_kustomize }}"
+  register: _obs_apply
+  changed_when: "'created' in _obs_apply.stdout or 'configured' in _obs_apply.stdout"
+  # "gateway-system not found" errors are expected — the operator already created
+  # the equivalent monitors in api-gateway. Only fail on other errors.
+  failed_when: >-
+    _obs_apply.rc != 0 and 'gateway-system' not in (_obs_apply.stderr | lower)
+
+- name: Import the example Kuadrant Grafana dashboards
+  ansible.builtin.command:
+    cmd: "oc apply -k {{ kuadrant_dashboards_kustomize }}"
+  register: _dash_apply
+  changed_when: "'created' in _dash_apply.stdout or 'configured' in _dash_apply.stdout"
+  failed_when: false   # best-effort: depends on the Grafana operator CRDs
+
+# -----------------------------------------------------------------------------
+# 4. Grafana (plain Deployment + Service + Route). The datasource is configured
+#    manually against thanos-querier; the SA below provides the Bearer-token
+#    identity (cluster-monitoring-view) it needs.
+# -----------------------------------------------------------------------------
+- name: Ensure the grafana namespace exists
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{ grafana_namespace }}"
+
+- name: Create the Grafana ServiceAccount
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: "{{ grafana_service_account }}"
+        namespace: "{{ grafana_namespace }}"
+
+- name: Bind the Grafana ServiceAccount to cluster-monitoring-view
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: grafana-cluster-monitoring-binding
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: cluster-monitoring-view
+      subjects:
+        - kind: ServiceAccount
+          name: "{{ grafana_service_account }}"
+          namespace: "{{ grafana_namespace }}"
+
+- name: Create the Grafana Deployment
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: grafana
+        namespace: "{{ grafana_namespace }}"
+        labels:
+          app: strimzi
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            name: grafana
+        template:
+          metadata:
+            labels:
+              name: grafana
+          spec:
+            serviceAccountName: "{{ grafana_service_account }}"
+            containers:
+              - name: grafana
+                image: "{{ grafana_image }}"
+                ports:
+                  - name: grafana
+                    containerPort: 3000
+                    protocol: TCP
+                volumeMounts:
+                  - name: grafana-data
+                    mountPath: /var/lib/grafana
+                  - name: grafana-logs
+                    mountPath: /var/log/grafana
+                readinessProbe:
+                  httpGet:
+                    path: /api/health
+                    port: 3000
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+                livenessProbe:
+                  httpGet:
+                    path: /api/health
+                    port: 3000
+                  initialDelaySeconds: 15
+                  periodSeconds: 20
+            volumes:
+              - name: grafana-data
+                emptyDir: {}
+              - name: grafana-logs
+                emptyDir: {}
+
+- name: Create the Grafana Service
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: grafana
+        namespace: "{{ grafana_namespace }}"
+        labels:
+          app: strimzi
+      spec:
+        type: ClusterIP
+        selector:
+          name: grafana
+        ports:
+          - name: grafana
+            port: 3000
+            targetPort: 3000
+            protocol: TCP
+
+- name: Expose Grafana with an edge-terminated Route
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: route.openshift.io/v1
+      kind: Route
+      metadata:
+        name: grafana
+        namespace: "{{ grafana_namespace }}"
+      spec:
+        to:
+          kind: Service
+          name: grafana
+        port:
+          targetPort: grafana
+        tls:
+          termination: edge
+          insecureEdgeTerminationPolicy: Redirect
+
+- name: Load the dashboard JSON files into ConfigMaps
+  kubernetes.core.k8s:
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "grafana-dashboard-{{ item | lower | regex_replace('[^a-z0-9]+', '-') | regex_replace('-+$', '') }}"
+        namespace: "{{ grafana_namespace }}"
+        labels:
+          app: grafana
+      # build data as one expression so the JSON filename (the key) is templated
+      data: "{{ { item: lookup('file', playbook_dir ~ '/' ~ item) } }}"
+  loop: "{{ grafana_dashboard_files }}"

@@ -7,7 +7,7 @@
 #
 # Useful tags (ansible-playbook main.yml --tags <tag>):
 #   preflight  operators  gitops  mesh  rhcl  kuadrant  demo-app
-#   gateway    auth       ratelimit  info
+#   gateway    auth       ratelimit  observability  info
 # =============================================================================
 - name: Deploy RHCL / Service Mesh 3 / GitOps demo
   hosts: localhost
@@ -71,6 +71,12 @@
       ansible.builtin.import_role:
         name: gateway
       tags: [gateway, auth, ratelimit]
+
+    - name: Configure RHCL observability (UWM, metrics, Grafana)
+      ansible.builtin.import_role:
+        name: observability
+      when: enable_observability | bool
+      tags: [observability]
 
     # ---- Wrap up -----------------------------------------------------------
     - name: Print access information

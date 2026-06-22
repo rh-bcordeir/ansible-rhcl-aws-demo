@@ -63,16 +63,22 @@ app_service_name: movies-quarkus
 app_service_port: 8080
 route_path_prefix: /api/v1/movies
 
-# Separate HTTPRoutes (the cluster's standard Gateway API does not support named
-# route rules / per-rule sectionName targeting, which is experimental). Each route
-# is targeted as a whole by its own AuthPolicy. backendRefs are injected
-# automatically from app_service_name:app_service_port (see roles/gateway).
-# Each route's policies follow the pattern "<route-name>-auth" / "<route-name>-rlp".
-#   - movies-quarkus-movies     : public movies endpoints (any valid API key)
-#   - movies-quarkus-directors  : restricted endpoint, web-app only
-#   - movies-quarkus-swagger    : public Swagger/OpenAPI UI (no auth)
-movies_route_name: movies-quarkus-movies
-movies_route_matches:
+# Name of the backing Deployment (used as the HTTPRoute "deployment" label so the
+# Kuadrant kube-state-metrics exporter can join state metrics with Envoy/Istio
+# traffic metrics). Defaults to the Service name.
+app_deployment_name: movies-quarkus
+
+# Single HTTPRoute for the whole movies-quarkus app. The standard Gateway API on
+# this cluster does not support per-rule sectionName targeting, so instead of
+# splitting endpoints across several routes we keep ONE route and differentiate
+# behaviour inside a single AuthPolicy using per-rule `when` (request.path)
+# predicates:
+#   - /api/v1/movies*   : any valid API key
+#   - /api/v1/directors : web-app identity only (others get 403)
+#   - /q/openapi        : public (anonymous, overrides the gateway deny-all)
+# backendRefs are injected automatically from app_service_name:app_service_port.
+route_name: movies-quarkus
+route_matches:
   - path: { type: Exact, value: /api/v1/movies }
     method: GET
   - path: { type: Exact, value: /api/v1/movies/drama }
@@ -81,21 +87,14 @@ movies_route_matches:
     method: GET
   - path: { type: Exact, value: /api/v1/movies }
     method: POST
-
-directors_route_name: movies-quarkus-directors
-directors_route_matches:
   - path: { type: Exact, value: /api/v1/directors }
     method: GET
-
-# Public OpenAPI endpoint — open to everyone (overrides the gateway deny-all).
-swagger_route_name: movies-quarkus-swagger
-swagger_path: /q/openapi
-swagger_route_matches:
   - path: { type: PathPrefix, value: /q/openapi }
 
-# The directors route is only authorized for this identity (user-id annotation).
+# Paths used by the AuthPolicy `when` predicates and the info/test output.
 directors_path: /api/v1/directors
 directors_allowed_user: web-app
+public_path: /q/openapi
 
 # -----------------------------------------------------------------------------
 # Demo application (deployed through OpenShift GitOps / ArgoCD)
@@ -133,6 +132,38 @@ api_key_app_label: movies-quarkus
 rate_limits:
   web-app: { limit: 5, window: 10s }
   mobile-app: { limit: 2, window: 10s }
+
+# -----------------------------------------------------------------------------
+# Observability (RHCL / Kuadrant metrics + Grafana)
+# -----------------------------------------------------------------------------
+enable_observability: true
+
+# Kustomize bundles from the Kuadrant Operator repo. Pin the refs to match the
+# RHCL/Kuadrant version you installed.
+#   - observability : installs kube-state-metrics-kuadrant (the gatewayapi_*
+#                     metrics exporter) + the operator ServiceMonitors. The
+#                     "gateway-system not found" errors it prints are expected
+#                     and harmless (the operator already created the equivalent
+#                     monitors in the api-gateway namespace).
+#   - dashboards    : imports the example Kuadrant dashboards.
+kuadrant_observability_kustomize: "https://github.com/Kuadrant/kuadrant-operator/config/install/configure/observability?ref=v1.2.0"
+kuadrant_dashboards_kustomize: "https://github.com/Kuadrant/kuadrant-operator/examples/dashboards?ref=v1.4.0"
+
+# Grafana (plain Deployment + Service + Route, no operator). Datasource is left
+# out on purpose — point it at thanos-querier
+# (https://thanos-querier.openshift-monitoring.svc.cluster.local:9091) with a
+# Bearer token from the grafana-service-account (bound to cluster-monitoring-view
+# below) and TLS skip-verify.
+grafana_namespace: grafana
+grafana_image: grafana/grafana:12.4.2
+grafana_service_account: grafana-service-account
+
+# Dashboard JSON files (in the project root). Loaded into ConfigMaps in the
+# grafana namespace; import them into Grafana via the UI/API.
+grafana_dashboard_files:
+  - 20981_rev3.json
+  - 20982_rev3.json
+  - 21538_rev1.json
 
 # -----------------------------------------------------------------------------
 # Behaviour tuning

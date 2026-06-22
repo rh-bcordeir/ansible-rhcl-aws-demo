@@ -62,29 +62,32 @@ Custom resources created:
 - `Istio/default` (→ `istio-system`) and `IstioCNI/default` (→ `istio-cni`)
 - ArgoCD `Application/movies-quarkus` (deploys the Helm chart into `cinema`)
 - `Gateway/ingress-gateway` in `api-gateway`
-- Three `HTTPRoute`s in `cinema` (named `<app>-<endpoint>`):
-  - `movies-quarkus-movies` — public movies endpoints (`/api/v1/movies`, `/drama`, `/comedia`)
-  - `movies-quarkus-directors` — restricted `/api/v1/directors` endpoint
-  - `movies-quarkus-swagger` — public OpenAPI endpoint (`/q/openapi`)
-- `AuthPolicy` deny-all on the Gateway, plus per-route policies (`<route>-auth`):
-  - `movies-quarkus-movies-auth` — any valid API key
-  - `movies-quarkus-directors-auth` — **web-app only** (other identities get 403)
-  - `movies-quarkus-swagger-auth` — **public** (anonymous; overrides the deny-all on `/q/openapi`)
+- One `HTTPRoute/movies-quarkus` in `cinema` carrying all endpoints:
+  - `/api/v1/movies`, `/api/v1/movies/drama`, `/api/v1/movies/comedia` (GET/POST)
+  - `/api/v1/directors` (GET)
+  - `/q/openapi` (public OpenAPI spec)
+- `AuthPolicy` deny-all on the Gateway, plus a single route policy
+  `movies-quarkus-auth` that differentiates behaviour per path with `when`
+  predicates:
+  - `/q/openapi` → **public** (anonymous; overrides the deny-all)
+  - `/api/v1/directors` → **web-app only** (other identities get 403)
+  - everything else → any valid API key
 - Per-app API-key `Secret`s in `kuadrant-system` (`web-app`, `mobile-app`)
-- `RateLimitPolicy/movies-quarkus-movies-rlp` on the movies route
+- `RateLimitPolicy/movies-quarkus-rlp` on the route (per-identity limits)
 
-> **Why separate HTTPRoutes instead of one with named rules + `sectionName`?**
+> **One HTTPRoute, one AuthPolicy — why not named rules + `sectionName`?**
 > Targeting an individual HTTPRoute *rule* by name (`sectionName`) is an
 > **experimental** Gateway API feature. OpenShift ships the **standard** Gateway
 > API channel (managed by the cluster ingress-operator), where route rules cannot
 > be named, so the apiserver prunes rule names and `sectionName` targeting fails
-> with `TargetNotFound`. Splitting the endpoints into separate routes — each
-> targeted as a whole by its AuthPolicy — gives the same behaviour on a standard
-> cluster.
+> with `TargetNotFound`. Instead we keep a single route and put all the
+> per-endpoint logic inside one AuthPolicy, selecting rules with `when`
+> (`request.path`) predicates — same behaviour, standard Gateway API.
 >
 > **Note:** only `/q/openapi` (the OpenAPI spec) is exposed publicly. To also
 > expose the Swagger UI, add a `{ type: PathPrefix, value: /q/swagger-ui }` match
-> to `swagger_route_matches` in `group_vars/all.yml`.
+> to `route_matches` in `group_vars/all.yml` (and `/q/swagger-ui` to the
+> `public` rule's `when` predicate).
 
 ---
 
@@ -122,6 +125,7 @@ ansible-playbook main.yml --tags rhcl,kuadrant # RHCL operator + Kuadrant CR + s
 ansible-playbook main.yml --tags console       # enable the RHCL web-console plugin
 ansible-playbook main.yml --tags demo-app      # ArgoCD Application only
 ansible-playbook main.yml --tags gateway,auth,ratelimit  # routing + policies
+ansible-playbook main.yml --tags observability # UWM + Kuadrant metrics + Grafana
 ```
 
 The `preflight` and `info` roles always run.
@@ -190,6 +194,48 @@ done
 
 ---
 
+## Observability
+
+The `observability` role (tag `observability`, toggle `enable_observability`)
+wires up the RHCL metrics pipeline so you can see traffic/auth/rate-limit
+metrics in Grafana. It:
+
+1. **Enables User Workload Monitoring** — merges `enableUserWorkload: true` into
+   `cluster-monitoring-config` in `openshift-monitoring` (existing settings are
+   preserved), which brings up the user-workload Prometheus.
+2. **Turns on Kuadrant observability** — sets `spec.observability.enable: true`
+   on the `Kuadrant` CR, which creates the component/gateway
+   `ServiceMonitor`s/`PodMonitor`s (including in `api-gateway`).
+3. **Installs the Kuadrant metrics exporter + dashboards** via the upstream
+   kustomize bundles:
+   - `kube-state-metrics-kuadrant` (produces the `gatewayapi_*` metrics) + the
+     operator `ServiceMonitor`s. The `gateway-system not found` errors it prints
+     are **expected** and ignored — the operator already created equivalent
+     monitors in `api-gateway`.
+   - the example Kuadrant dashboards.
+4. **Tags the HTTPRoute** with `service: movies-quarkus` and
+   `deployment: movies-quarkus` so kube-state-metrics can join route state with
+   the Envoy/Istio traffic metrics. (The route is named `movies-quarkus` to match
+   the Service — Istio aggregates traffic metrics by Service, not by route.)
+5. **Deploys Grafana** — a plain `Deployment` + `Service` + edge `Route` in the
+   `grafana` namespace, with a `grafana-service-account` bound to
+   `cluster-monitoring-view`. The three dashboard JSONs in the repo root are
+   loaded into `ConfigMap`s in that namespace.
+
+> **You still configure the Grafana datasource manually.** Point it at the
+> in-cluster Thanos:
+> `https://thanos-querier.openshift-monitoring.svc.cluster.local:9091`, auth =
+> Bearer token of the `grafana-service-account` (it has `cluster-monitoring-view`),
+> with TLS skip-verify (or the cluster CA). Then import the dashboards from the
+> `ConfigMap`s. Validate end-to-end against Thanos, e.g.
+> `count({__name__=~"gatewayapi_.+"}) > 0` and `count(istio_requests_total) > 0`,
+> and check **Observe → Targets** are `Up`.
+>
+> Pin `kuadrant_observability_kustomize` / `kuadrant_dashboards_kustomize` in
+> `group_vars/all.yml` to the refs that match your installed RHCL version.
+
+---
+
 ## Layout
 
 ```
@@ -205,5 +251,6 @@ roles/
   mesh/                  # Istio + IstioCNI control plane (Service Mesh 3)
   demo_app/              # ArgoCD Application (movies-quarkus)
   gateway/               # Gateway, HTTPRoute, AuthPolicies, RateLimitPolicy
+  observability/         # UWM, Kuadrant metrics, kube-state-metrics, Grafana
   info/                  # prints endpoint + test commands
 ```

@@ -46,60 +46,29 @@
                 from: All
 
 # -----------------------------------------------------------------------------
-# HTTPRoutes (live in the application namespace, target the backend Service).
-# Separate routes so each can be targeted as a whole by an AuthPolicy
-# (the standard Gateway API on this cluster does not support per-rule targeting).
+# Single HTTPRoute (lives in the application namespace, targets the backend
+# Service). All endpoints share one route; the AuthPolicy below differentiates
+# behaviour per path with `when` predicates.
 # -----------------------------------------------------------------------------
-- name: Create the HTTPRoute for the public movies endpoints
+- name: Create the movies-quarkus HTTPRoute
   kubernetes.core.k8s:
     definition:
       apiVersion: gateway.networking.k8s.io/v1
       kind: HTTPRoute
       metadata:
-        name: "{{ movies_route_name }}"
+        name: "{{ route_name }}"
         namespace: "{{ app_namespace }}"
+        labels:
+          # let the Kuadrant kube-state-metrics exporter join route state with
+          # the Service/Deployment traffic metrics (must match the real names)
+          service: "{{ app_service_name }}"
+          deployment: "{{ app_deployment_name | default(app_service_name) }}"
       spec:
         parentRefs:
           - name: "{{ gateway_name }}"
             namespace: "{{ api_gateway_namespace }}"
         rules:
-          - matches: "{{ movies_route_matches }}"
-            backendRefs:
-              - name: "{{ app_service_name }}"
-                port: "{{ app_service_port }}"
-
-- name: Create the HTTPRoute for the restricted directors endpoint
-  kubernetes.core.k8s:
-    definition:
-      apiVersion: gateway.networking.k8s.io/v1
-      kind: HTTPRoute
-      metadata:
-        name: "{{ directors_route_name }}"
-        namespace: "{{ app_namespace }}"
-      spec:
-        parentRefs:
-          - name: "{{ gateway_name }}"
-            namespace: "{{ api_gateway_namespace }}"
-        rules:
-          - matches: "{{ directors_route_matches }}"
-            backendRefs:
-              - name: "{{ app_service_name }}"
-                port: "{{ app_service_port }}"
-
-- name: Create the HTTPRoute for the public Swagger/OpenAPI endpoint
-  kubernetes.core.k8s:
-    definition:
-      apiVersion: gateway.networking.k8s.io/v1
-      kind: HTTPRoute
-      metadata:
-        name: "{{ swagger_route_name }}"
-        namespace: "{{ app_namespace }}"
-      spec:
-        parentRefs:
-          - name: "{{ gateway_name }}"
-            namespace: "{{ api_gateway_namespace }}"
-        rules:
-          - matches: "{{ swagger_route_matches }}"
+          - matches: "{{ route_matches }}"
             backendRefs:
               - name: "{{ app_service_name }}"
                 port: "{{ app_service_port }}"
@@ -150,19 +119,24 @@
                       "message": "Acesso negado por padrão pelo gateway. Se você é o administrador do serviço, crie uma auth policy específica para a rota."
                     }
 
-- name: Create the API-key AuthPolicy on the movies HTTPRoute
+- name: Create the AuthPolicy on the movies-quarkus HTTPRoute
   kubernetes.core.k8s:
+    # One policy for the whole route. Per-path behaviour is selected with `when`
+    # predicates on request.path:
+    #   - /q/openapi        -> anonymous (public), API-key rule is skipped
+    #   - everything else   -> a valid API key is required
+    #   - /api/v1/directors -> additionally requires the web-app identity
     definition:
       apiVersion: kuadrant.io/v1
       kind: AuthPolicy
       metadata:
-        name: "{{ movies_route_name }}-auth"
+        name: "{{ route_name }}-auth"
         namespace: "{{ app_namespace }}"
       spec:
         targetRef:
           group: gateway.networking.k8s.io
           kind: HTTPRoute
-          name: "{{ movies_route_name }}"
+          name: "{{ route_name }}"
         defaults:
           rules:
             authentication:
@@ -175,46 +149,20 @@
                 credentials:
                   authorizationHeader:
                     prefix: APIKEY
-            response:
-              success:
-                filters:
-                  "identity":
-                    json:
-                      properties:
-                        "userid":
-                          selector: auth.identity.metadata.annotations.secret\.kuadrant\.io/user-id
-
-- name: Create the web-app-only AuthPolicy on the directors HTTPRoute
-  kubernetes.core.k8s:
-    definition:
-      apiVersion: kuadrant.io/v1
-      kind: AuthPolicy
-      metadata:
-        name: "{{ directors_route_name }}-auth"
-        namespace: "{{ app_namespace }}"
-      spec:
-        targetRef:
-          group: gateway.networking.k8s.io
-          kind: HTTPRoute
-          name: "{{ directors_route_name }}"
-        defaults:
-          rules:
-            authentication:
-              "api-key-users":
-                apiKey:
-                  selector:
-                    matchLabels:
-                      app: "{{ api_key_app_label }}"
-                  allNamespaces: true
-                credentials:
-                  authorizationHeader:
-                    prefix: APIKEY
+                when:
+                  - predicate: "request.path != '{{ public_path }}'"
+              "public":
+                anonymous: {}                 # public OpenAPI endpoint only
+                when:
+                  - predicate: "request.path == '{{ public_path }}'"
             authorization:
               "web-only":
                 patternMatching:
                   patterns:
                     - predicate: >-
                         auth.identity.metadata.annotations["secret.kuadrant.io/user-id"] == "{{ directors_allowed_user }}"
+                when:
+                  - predicate: "request.path == '{{ directors_path }}'"
             response:
               success:
                 filters:
@@ -231,27 +179,8 @@
                   value: |
                     {
                       "error": "Forbidden",
-                      "message": "Este endpoint está disponível apenas para o web-app."
+                      "message": "Acesso negado. É necessário uma API key válida; o endpoint /api/v1/directors está disponível apenas para o web-app."
                     }
-
-- name: Create the public (anonymous) AuthPolicy on the swagger HTTPRoute
-  kubernetes.core.k8s:
-    definition:
-      apiVersion: kuadrant.io/v1
-      kind: AuthPolicy
-      metadata:
-        name: "{{ swagger_route_name }}-auth"
-        namespace: "{{ app_namespace }}"
-      spec:
-        targetRef:
-          group: gateway.networking.k8s.io
-          kind: HTTPRoute
-          name: "{{ swagger_route_name }}"
-        defaults:
-          rules:
-            authentication:
-              "public":
-                anonymous: {}        # allows everyone; overrides the gateway deny-all
 
 # -----------------------------------------------------------------------------
 # Rate limiting per identity
@@ -266,19 +195,19 @@
   delay: "{{ crd_wait_delay }}"
   until: _rlp_crd.resources | length > 0
 
-- name: Create the RateLimitPolicy on the movies HTTPRoute
+- name: Create the RateLimitPolicy on the movies-quarkus HTTPRoute
   kubernetes.core.k8s:
     definition:
       apiVersion: kuadrant.io/v1
       kind: RateLimitPolicy
       metadata:
-        name: "{{ movies_route_name }}-rlp"
+        name: "{{ route_name }}-rlp"
         namespace: "{{ app_namespace }}"
       spec:
         targetRef:
           group: gateway.networking.k8s.io
           kind: HTTPRoute
-          name: "{{ movies_route_name }}"
+          name: "{{ route_name }}"
         limits:
           web-app-limit:
             rates:
@@ -287,7 +216,9 @@
             counters:
               - expression: auth.identity.userid
             when:
+              # rate limit web-app traffic, but never the directors endpoint
               - predicate: "auth.identity.userid == 'web-app'"
+              - predicate: "request.path != '{{ directors_path }}'"
           mobile-app-limit:
             rates:
               - limit: "{{ rate_limits['mobile-app'].limit }}"
@@ -295,4 +226,6 @@
             counters:
               - expression: auth.identity.userid
             when:
+              # rate limit mobile-app traffic, but never the directors endpoint
               - predicate: "auth.identity.userid == 'mobile-app'"
+              - predicate: "request.path != '{{ directors_path }}'"
