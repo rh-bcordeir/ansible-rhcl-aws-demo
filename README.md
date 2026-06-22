@@ -62,10 +62,29 @@ Custom resources created:
 - `Istio/default` (→ `istio-system`) and `IstioCNI/default` (→ `istio-cni`)
 - ArgoCD `Application/movies-quarkus` (deploys the Helm chart into `cinema`)
 - `Gateway/ingress-gateway` in `api-gateway`
-- `HTTPRoute/movies-quarkus` in `cinema`
-- `AuthPolicy` deny-all on the Gateway + API-key policy on the route
+- Three `HTTPRoute`s in `cinema` (named `<app>-<endpoint>`):
+  - `movies-quarkus-movies` — public movies endpoints (`/api/v1/movies`, `/drama`, `/comedia`)
+  - `movies-quarkus-directors` — restricted `/api/v1/directors` endpoint
+  - `movies-quarkus-swagger` — public OpenAPI endpoint (`/q/openapi`)
+- `AuthPolicy` deny-all on the Gateway, plus per-route policies (`<route>-auth`):
+  - `movies-quarkus-movies-auth` — any valid API key
+  - `movies-quarkus-directors-auth` — **web-app only** (other identities get 403)
+  - `movies-quarkus-swagger-auth` — **public** (anonymous; overrides the deny-all on `/q/openapi`)
 - Per-app API-key `Secret`s in `kuadrant-system` (`web-app`, `mobile-app`)
-- `RateLimitPolicy/movies-quarkus-rlp` in `cinema`
+- `RateLimitPolicy/movies-quarkus-movies-rlp` on the movies route
+
+> **Why separate HTTPRoutes instead of one with named rules + `sectionName`?**
+> Targeting an individual HTTPRoute *rule* by name (`sectionName`) is an
+> **experimental** Gateway API feature. OpenShift ships the **standard** Gateway
+> API channel (managed by the cluster ingress-operator), where route rules cannot
+> be named, so the apiserver prunes rule names and `sectionName` targeting fails
+> with `TargetNotFound`. Splitting the endpoints into separate routes — each
+> targeted as a whole by its AuthPolicy — gives the same behaviour on a standard
+> cluster.
+>
+> **Note:** only `/q/openapi` (the OpenAPI spec) is exposed publicly. To also
+> expose the Swagger UI, add a `{ type: PathPrefix, value: /q/swagger-ui }` match
+> to `swagger_route_matches` in `group_vars/all.yml`.
 
 ---
 

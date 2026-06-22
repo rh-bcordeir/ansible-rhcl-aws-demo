@@ -63,6 +63,40 @@ app_service_name: movies-quarkus
 app_service_port: 8080
 route_path_prefix: /api/v1/movies
 
+# Separate HTTPRoutes (the cluster's standard Gateway API does not support named
+# route rules / per-rule sectionName targeting, which is experimental). Each route
+# is targeted as a whole by its own AuthPolicy. backendRefs are injected
+# automatically from app_service_name:app_service_port (see roles/gateway).
+# Each route's policies follow the pattern "<route-name>-auth" / "<route-name>-rlp".
+#   - movies-quarkus-movies     : public movies endpoints (any valid API key)
+#   - movies-quarkus-directors  : restricted endpoint, web-app only
+#   - movies-quarkus-swagger    : public Swagger/OpenAPI UI (no auth)
+movies_route_name: movies-quarkus-movies
+movies_route_matches:
+  - path: { type: Exact, value: /api/v1/movies }
+    method: GET
+  - path: { type: Exact, value: /api/v1/movies/drama }
+    method: GET
+  - path: { type: Exact, value: /api/v1/movies/comedia }
+    method: GET
+  - path: { type: Exact, value: /api/v1/movies }
+    method: POST
+
+directors_route_name: movies-quarkus-directors
+directors_route_matches:
+  - path: { type: Exact, value: /api/v1/directors }
+    method: GET
+
+# Public OpenAPI endpoint — open to everyone (overrides the gateway deny-all).
+swagger_route_name: movies-quarkus-swagger
+swagger_path: /q/openapi
+swagger_route_matches:
+  - path: { type: PathPrefix, value: /q/openapi }
+
+# The directors route is only authorized for this identity (user-id annotation).
+directors_path: /api/v1/directors
+directors_allowed_user: web-app
+
 # -----------------------------------------------------------------------------
 # Demo application (deployed through OpenShift GitOps / ArgoCD)
 # -----------------------------------------------------------------------------
