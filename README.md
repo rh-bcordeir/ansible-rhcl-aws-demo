@@ -186,6 +186,12 @@ for i in $(seq 1 6); do
   curl -s -o /dev/null -w "%{http_code}\n" \
     -H 'Authorization: APIKEY CHAVE_DO_APP_MOBILE' $GW/api/v1/movies
 done
+
+# Rate limit — web is 5 req / 10s, should start returning 429:
+for i in $(seq 1 8); do
+  curl -s -o /dev/null -w "%{http_code}\n" \
+    -H 'Authorization: APIKEY CHAVE_DO_APP_WEB' $GW/api/v1/movies
+done
 ```
 
 > If the deny-all AuthPolicy does not take effect, roll out the controller as the
